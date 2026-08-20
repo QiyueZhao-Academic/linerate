@@ -1,0 +1,48 @@
+\section{Controls}
+\label{sec:controls}
+
+Each control carries a prediction made before the measurement and recorded next
+to the outcome. A control whose prediction is written down afterwards cannot
+fail, and a control that cannot fail is decoration. Of \ctlRan\ controls that
+ran, \ctlPassed\ passed. Table~\ref{tab:controls} gives each one with its
+prediction and what happened.
+
+\noindent\textbf{The null cipher.}
+Replacing the AEAD with a copy of the same length leaves everything else in the
+hot path unchanged: the same system calls, the same replay window, the same
+header parse, the same buffers. What remains is the fixed cost of the data plane
+with the cryptography removed, \ctlNullFixed\ cycles against \ctlAEADFixed\ with
+it. The difference, \ctlAEADOnlyFixed\ cycles, is what the AEAD contributes to
+$a$. It is per-message setup and teardown, it does not scale with payload, and
+it therefore cannot be amortised by sending larger packets. Without this
+control, $a$ would be a single opaque number; with it, it decomposes.
+
+Whether the per-byte terms of the two configurations can be compared at all
+depends on the host. Where the fixed cost dwarfs the per-byte term across the
+whole payload range, two small slopes differ by less than the fit resolves, and
+requiring one to fall below the other would make this control fail on noise. The
+control measures that condition rather than assuming it. On this host the
+per-byte terms are separately identifiable: \ctlPerByteIdentifiable.
+
+\noindent\textbf{The masking control.}
+If clearing the hardware crypto capability bits did not raise $b$ by a large
+factor, the mask never reached the implementation, and every masked measurement
+in Section~\ref{sec:costmodel} would be void. This is the control that makes the
+masked arm trustworthy rather than merely present.
+
+\noindent\textbf{Instrumentation controls.}
+Three checks confirm that the harness is not measuring itself. The cost of
+polling an empty socket is weighted by how often that actually happens in a run,
+because a poll that costs a tenth of a packet but occurs once per thousand
+packets contaminates nothing; the amortised figure is the one with a threshold
+attached. A forged packet is required to cost about what a valid one costs, so
+that rejection is neither a cheap path through the loop nor a side channel. And
+every cipher level in the design is confirmed constructible, since a missing
+level would silently shrink the experiment.
+
+\begin{table*}[t]
+\caption{Controls, with the prediction each was given before it ran.}
+\label{tab:controls}
+\centering\footnotesize
+\input{generated/table_controls}
+\end{table*}

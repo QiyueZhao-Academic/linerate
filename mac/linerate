@@ -1,0 +1,907 @@
+#!/usr/bin/env bash
+#
+# linerate — the whole study, driven from a Mac terminal.
+#
+# One command does everything:
+#
+#   ./mac/linerate go --project ID --billing ID
+#
+# and the six it is made of remain available separately, because a run that
+# fails halfway should be resumable from the step that failed rather than from
+# the beginning:
+#
+#   ./mac/linerate up      create the project and two VMs, build on both
+#   ./mac/linerate run     run the sweep on the VMs
+#   ./mac/linerate watch   re-attach to a sweep already running
+#   ./mac/linerate fetch   bring the dataset back to this machine
+#   ./mac/linerate report  build figures and the PDF here
+#   ./mac/linerate down    delete the VMs, so they stop billing
+#
+# Nothing about the author's Google account, project or billing is in this
+# repository. `up` takes a project name and a billing account, or asks for
+# them, and remembers them in ~/.linerate/state.env — outside the repository, so
+# they cannot be committed.
+#
+# The Mac never measures. It creates, builds, drives, collects and typesets;
+# every cycle count comes from a Linux VM. That split is enforced in the harness
+# itself, which refuses to write a measurement from a host it classifies as
+# 'development'.
+#
+# Two properties of this driver are worth knowing before reading it. Nothing it
+# starts on a node is left attached to the ssh session that started it, and
+# nothing it waits for is waited for without a clock: those are the two failures
+# that used to stop a run — one for ever after printing the word 'started', the
+# other whenever an hour-long sweep sat behind a tunnel that dropped.
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+# Every command this prints for the operator to run is printed as an absolute
+# path. The relative form is correct only from inside the repository, and the
+# messages that matter are the ones printed when something has failed — at which
+# point an instruction that depends on the working directory produces
+# 'zsh: no such file or directory' on top of the failure it was meant to repair.
+SELF="$HERE/linerate"
+ENVDIR="${LR_ENV_DIR:-$(dirname "$REPO")/linerate-env}"
+
+. "$HERE/lib/ui.sh"
+. "$HERE/lib/vm.sh"
+. "$HERE/lib/gcloud.sh"
+
+# Everything below appends to the driver log, so it has to exist before any of
+# it runs rather than after whichever command happens to create it first.
+state_dir
+
+# A project per study, named for the study. Project IDs are globally unique, so
+# this one is a suggestion: if it is taken, `up` adds a suffix, says so, and
+# remembers the ID it actually got.
+DEFAULT_PROJECT="linerate-payload-2026"
+DEFAULT_PROJECT_NAME="LineRate Payload Crossover"
+DEFAULT_ZONE="europe-west1-b"
+DEFAULT_MACHINE="c3-standard-4"
+
+LR_POLL="${LR_POLL:-20}"
+
+usage() {
+  cat <<EOF
+linerate — measure the per-packet cost of an encrypted UDP data plane on two VMs.
+
+  bash $SELF go [--project ID] [--billing ID] [--keep] [--quick-only]
+  bash $SELF up [--project ID] [--billing ID] [--zone Z] [--machine TYPE]
+  bash $SELF run [--quick] [--full]
+  bash $SELF watch
+  bash $SELF fetch
+  bash $SELF report
+  bash $SELF down
+  bash $SELF purge
+  bash $SELF status
+  bash $SELF doctor
+  bash $SELF cloud [--project ID]
+
+'go' is the whole cycle: check this Mac, delete other instances on the account,
+create the project and two VMs, build, smoke-test, sweep, fetch, typeset, and
+delete the VMs. It asks once, at the start, and then does not stop to ask again.
+
+Options for 'go'
+  --keep          Leave the two instances running at the end. They bill until
+                  bash $SELF down.
+  --quick-only    Stop after the two-minute smoke run. For checking the path
+                  without spending the hour.
+
+Options for 'up'
+  --project ID    Google Cloud project to use or create. Default:
+                  linerate-payload-2026. IDs are globally unique; if that one
+                  is taken a suffix is added and the result is printed.
+  --billing ID    Billing account to link. List yours with:
+                    gcloud billing accounts list
+  --zone Z        Default: europe-west1-b. Both VMs land in the same zone, so
+                  the link between them is a single hop.
+  --machine TYPE  Default: c3-standard-4. Needs at least four vCPUs: the data
+                  plane, the io_uring submission poller and the load generator
+                  each want a core of their own, and a smaller instance makes
+                  the latency experiment measure scheduling instead of queueing.
+  --keep-other-vms
+                  Do not delete the other instances on the account. They share
+                  hardware with the measurement; what they do arrives in this
+                  study's data as variance.
+  --reuse-instances
+                  Keep an instance of the same name left from an earlier
+                  attempt instead of deleting and making it again. Faster, and
+                  it measures a machine whose state nothing recorded.
+
+Options for 'run'
+  --quick         A reduced grid, about two minutes. Exercises every path and
+                  produces a complete dataset, but not one to draw conclusions
+                  from; the dataset records that it was a quick run.
+  --full          The full grid including the virtualisation tiers, the service
+                  chain, the network baselines and the netem conditions. An hour
+                  or so.
+
+Environment
+  LR_YES=1        Skip every confirmation prompt. Use only in scripts.
+  LR_STATE_DIR    Where state is kept. Default: ~/.linerate
+  LR_POLL         Seconds between reads of the sweep's log. Default: 20
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# This Mac
+# ---------------------------------------------------------------------------
+
+# The analysis runs in a virtual environment beside the repository rather than
+# against whichever python3 is first on PATH, because Homebrew's refuses to be
+# installed into and the error it gives — externally-managed-environment —
+# arrives at the end of a run, after the measuring is done.
+lr_python() {
+  if [ -x "$ENVDIR/venv/bin/python3" ]; then
+    printf '%s\n' "$ENVDIR/venv/bin/python3"
+  else
+    printf '%s\n' "python3"
+  fi
+}
+
+cmd_preflight() {
+  step "This Mac"
+  state_dir
+  need bash ""
+  need python3 "Install the command line tools: xcode-select --install"
+
+  # A zip archive does not carry the Unix execute bit and macOS marks anything
+  # downloaded as quarantined. Both are repaired here rather than in a runbook
+  # line the reader has to remember.
+  chmod +x "$HERE/linerate" "$REPO"/*.sh "$REPO"/cloud/*.sh 2>/dev/null || true
+  if [ "$(uname -s)" = "Darwin" ]; then
+    xattr -cr "$REPO" 2>/dev/null || true
+  fi
+
+  # A tree unzipped over an older one keeps whatever the older one had that the
+  # new archive does not, and for this project that is a dataset and a PDF from
+  # a machine nobody here measured. Moving it aside now, rather than at fetch
+  # time, means there is no report in the tree at any point during a run except
+  # the one this run produces.
+  if [ -d "$REPO/results" ] && [ ! -f "$REPO/results/.linerate-session" ]; then
+    local aside="$REPO/results-previous-$(date +%Y%m%d-%H%M%S)"
+    mv "$REPO/results" "$aside"
+    warn "a results/ from an earlier archive or run was in the way;"
+    warn "moved to $(basename "$aside"). Nothing in the tree is a measurement now."
+  fi
+
+  if [ ! -x "$ENVDIR/venv/bin/python3" ]; then
+    running "creating the analysis environment in $ENVDIR/venv"
+    mkdir -p "$ENVDIR"
+    python3 -m venv "$ENVDIR/venv" \
+      || die "could not create a virtual environment at $ENVDIR/venv"
+    # --no-cache-dir because a pip cache written by an older interpreter prints
+    # a deserialisation warning for every entry it cannot read, which is a
+    # screenful of alarming output about nothing.
+    "$ENVDIR/venv/bin/pip" install -q --no-cache-dir --disable-pip-version-check \
+      -r "$REPO/requirements.txt" \
+      || die "could not install $REPO/requirements.txt into $ENVDIR/venv"
+  fi
+  # An environment that exists is not an environment that works. Finding that
+  # out here costs a second; finding it out after the sweep costs the sweep.
+  "$ENVDIR/venv/bin/python3" -c 'import numpy, matplotlib' >/dev/null 2>&1 \
+    || die "the analysis environment at $ENVDIR/venv cannot import numpy and
+    matplotlib. Delete it and run this again:  rm -rf $ENVDIR/venv"
+  ok "analysis environment $ENVDIR/venv"
+
+  if command -v latexmk >/dev/null 2>&1; then
+    ok "latexmk"
+  else
+    warn "latexmk is missing: the dataset, the figures and the macros will all"
+    warn "be produced, and only the PDF will not. To add it:"
+    dim "brew install --cask basictex && eval \"\$(/usr/libexec/path_helper)\" && sudo tlmgr install latexmk acmart booktabs preprint"
+  fi
+
+  gcloud_check
+  ok "gcloud, signed in as $(gcloud_account)"
+}
+
+cmd_doctor() {
+  step "Checking this Mac"
+  say ""
+  info "This machine builds, drives and typesets. It never measures:"
+  info "the harness classifies macOS as a development host and refuses to"
+  info "write a measurement from one."
+  say ""
+  if command -v gcloud >/dev/null 2>&1; then
+    ok "gcloud $(gcloud version --format='value("Google Cloud SDK")' 2>/dev/null | head -1)"
+    local account
+    account="$(gcloud_account || true)"
+    if [ -n "$account" ]; then ok "signed in as $account"
+    else warn "not signed in. Run: gcloud auth login"; fi
+  else
+    warn "gcloud is not installed: https://cloud.google.com/sdk/docs/install"
+  fi
+  for t in python3 latexmk; do
+    if command -v "$t" >/dev/null 2>&1; then ok "$t"; else
+      warn "$t is missing; $( [ "$t" = latexmk ] && echo 'the PDF cannot be built here' || echo 'the analysis cannot run here')"
+    fi
+  done
+  if [ -x "$ENVDIR/venv/bin/python3" ]; then ok "analysis environment $ENVDIR/venv"
+  else dim "no analysis environment yet; go or preflight creates one"; fi
+  if [ -f "$LR_STATE" ]; then
+    state_load
+    ok "existing session: project ${LR_PROJECT:-none}, zone ${LR_ZONE:-none}"
+  else
+    dim "no session yet; start with bash $SELF go"
+  fi
+}
+
+lr_cloud_footer() {
+  local restorable n
+  restorable="$(gcloud_restorable_projects)"
+  n="$(printf '%s' "$restorable" | grep -c . || true)"
+  if [ "$n" != "0" ]; then
+    say ""
+    warn "$n project(s) on this account are shut down and awaiting deletion:"
+    printf '%s\n' "$restorable" | sed 's/^/        /'
+    info "  Google keeps them for thirty days and counts every one of them"
+    info "  against the quota that limits how many projects may exist, so"
+    info "  deleting them has freed nothing. If a new project cannot be"
+    info "  created, restoring one of these is the way through — it costs no"
+    info "  quota that has not already been spent:"
+    info "      bash $SELF go --project ONE-OF-THOSE"
+    info "  Note that shutting a project down disconnects its billing account"
+    info "  and restoring it does not reconnect it; 'go' does that itself."
+  fi
+  say ""
+  info "Nothing was created and nothing was charged by this command."
+}
+
+lr_report_billing_accounts() {
+  local accounts
+  accounts="$(gcloud_open_billing_accounts)"
+  if [ -n "$accounts" ]; then
+    ok "open billing account(s) this login can link:"
+    printf '%s\n' "$accounts" | sed 's/^/        /'
+  else
+    warn "no open billing account on this login, and one is needed"
+    info "  https://console.cloud.google.com/billing"
+  fi
+}
+
+# Everything about the Google side that can be established without creating
+# anything or spending anything. This exists because the failure it reports —
+# a project that is visible, has no billing account, and therefore cannot have
+# Compute Engine enabled — used to be discovered three steps into a run, as a
+# message about a project that was not found.
+cmd_cloud() {
+  local project="${LR_PROJECT:-}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project) project="$2"; shift 2 ;;
+      *) die "unknown option for cloud: $1" ;;
+    esac
+  done
+  gcloud_check
+  state_dir
+  if [ -z "$project" ]; then
+    state_load
+    project="${LR_PROJECT:-$DEFAULT_PROJECT}"
+  fi
+
+  step "Google Cloud"
+  info "account  $(gcloud_account)"
+  info "project  $project"
+  say ""
+
+  local probe
+  probe="$(gcloud_project_probe "$project")"
+  case "$probe" in
+    active) ok "the project exists and is visible to this account" ;;
+    deleted) warn "the project is pending deletion; nothing can be created in it"
+             info "  bash $SELF go --project $project"
+             info "  restores it, relinks billing, and carries on. It is counted"
+             info "  against the project quota either way, so restoring it costs"
+             info "  nothing that has not already been spent."
+             lr_report_billing_accounts
+             lr_cloud_footer
+             return 0 ;;
+    unknown) dim "this account cannot see a project by that ID."
+             dim "Google will not say whether that means it does not exist or"
+             dim "belongs to somebody else — both answers would leak which IDs"
+             dim "in a global namespace are taken. Creating it is what settles"
+             dim "it, and that is what 'go' does."
+             lr_report_billing_accounts
+             lr_cloud_footer
+             return 0 ;;
+  esac
+
+  if gcloud_billing_enabled "$project"; then
+    ok "billing is enabled on it"
+  else
+    warn "billing is NOT enabled on it — this is what stops a run"
+    info "  Compute Engine cannot be switched on for an unbilled project, and"
+    info "  every call afterwards then answers 'resource not found'."
+    local accounts
+    accounts="$(gcloud_open_billing_accounts)"
+    if [ -n "$accounts" ]; then
+      info "  open billing account(s) this login can link:"
+      printf '%s\n' "$accounts" | sed 's/^/        /'
+      info "  bash $SELF go --project $project     links the first of them"
+    else
+      warn "  and this login holds no open billing account either"
+      info "  https://console.cloud.google.com/billing"
+    fi
+  fi
+
+  local api
+  for api in compute.googleapis.com iap.googleapis.com oslogin.googleapis.com; do
+    if gcloud_api_enabled "$project" "$api"; then ok "$api enabled"
+    else warn "$api not enabled"; fi
+  done
+
+  if gc 60 compute networks describe default --project="$project" \
+       --format='value(name)' >/dev/null 2>>"$LR_LOG"; then
+    ok "VPC network 'default' exists"
+  else
+    warn "no VPC network called 'default'; bash $SELF go creates one"
+  fi
+  lr_cloud_footer
+}
+
+# ---------------------------------------------------------------------------
+# up
+# ---------------------------------------------------------------------------
+
+cmd_up() {
+  local project="${LR_PROJECT:-}" billing="${LR_BILLING:-}"
+  local display="${LR_PROJECT_NAME:-$DEFAULT_PROJECT_NAME}"
+  local zone="${LR_ZONE:-$DEFAULT_ZONE}" machine="${LR_MACHINE:-$DEFAULT_MACHINE}"
+  local purge=1
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project) project="$2"; shift 2 ;;
+      --name)    display="$2"; shift 2 ;;
+      --billing) billing="$2"; shift 2 ;;
+      --zone)    zone="$2"; shift 2 ;;
+      --machine) machine="$2"; shift 2 ;;
+      --keep-other-vms) purge=0; shift ;;
+      --reuse-instances) export LR_REUSE_INSTANCES=1; shift ;;
+      *) die "unknown option for up: $1" ;;
+    esac
+  done
+
+  gcloud_check
+  state_dir
+  step "Google Cloud"
+  info "account: $(gcloud_account)"
+
+  if [ -z "$project" ]; then
+    printf '    Project ID to use or create [%s]: ' "$DEFAULT_PROJECT"
+    read -r project </dev/tty || true
+    [ -n "$project" ] || project="$DEFAULT_PROJECT"
+  fi
+  gcloud_create_project "$project" "$display"
+  project="$LR_PROJECT_CHOSEN"
+
+  # Four separate things, in the only order in which they work, each of which
+  # now fails loudly on its own. Billing is established whether the project was
+  # created a moment ago or has been sitting on the account since an earlier
+  # attempt: an existing project is not a paid-for one, and the run that assumed
+  # it was is the one that ended at a firewall rule.
+  step "Project readiness"
+  gcloud_ensure_billing "$project" "$billing"
+  gcloud_enable_apis "$project"
+  gcloud_wait_compute_ready "$project"
+  gcloud_ensure_network "$project"
+  gcloud_firewall "$project" "10.128.0.0/9"
+
+  LR_PROJECT="$project"; LR_PROJECT_NAME="$display"
+  LR_ZONE="$zone"; LR_MACHINE="$machine"
+  LR_NODE_A="linerate-a"; LR_NODE_B="linerate-b"
+  LR_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  state_save
+
+  if [ "$purge" = "1" ]; then
+    step "Other virtual machines on this account"
+    info "A neighbouring instance competes for the same physical host, the same"
+    info "last-level cache and the same network. What it does arrives here as"
+    info "variance on whichever factor level was running at the time."
+    gcloud_purge_foreign_instances "$LR_PROJECT" "$LR_NODE_A" "$LR_NODE_B"
+  fi
+
+  step "Instances"
+  warn "Two $machine instances in $zone will now be created. They bill by the"
+  warn "second while they exist. 'bash $SELF down' deletes them."
+  confirm "Create $LR_NODE_A and $LR_NODE_B?"
+  # Node A first, and node B on whatever node A turned out to be. The two nodes
+  # being identical is what makes a difference between them impossible to
+  # explain away as hardware, so a fallback that applied to one of them and not
+  # the other would cost more than the fallback saves.
+  vm_create "$LR_PROJECT" "$zone" "$machine" "$LR_NODE_A"
+  machine="$LR_MACHINE"
+  vm_create "$LR_PROJECT" "$zone" "$machine" "$LR_NODE_B"
+  if [ "$LR_MACHINE" != "$machine" ]; then
+    die "the two nodes could not be given the same machine type: $LR_NODE_A is
+    $machine and $LR_NODE_B could only be created as $LR_MACHINE. Delete both
+    and run again in another zone:  bash $SELF down && bash $SELF go --zone europe-west4-a"
+  fi
+  state_save
+  vm_wait_ssh "$LR_PROJECT" "$zone" "$LR_NODE_A"
+  vm_wait_ssh "$LR_PROJECT" "$zone" "$LR_NODE_B"
+
+  LR_IP_A="$(gcloud_internal_ip "$LR_PROJECT" "$LR_NODE_A" "$zone")"
+  LR_IP_B="$(gcloud_internal_ip "$LR_PROJECT" "$LR_NODE_B" "$zone")"
+  [ -n "$LR_IP_A" ] && [ -n "$LR_IP_B" ] || die "could not read the instances' internal addresses"
+  # Two nodes reporting one address is not a network the study can describe: the
+  # generator would be sending to itself, the data plane would measure a loopback
+  # path, and the numbers would look plausible the whole way through. Cheaper to
+  # refuse it here than to find it in the dataset.
+  [ "$LR_IP_A" != "$LR_IP_B" ] || die "both instances report the same internal address
+    ($LR_IP_A). One of them is not the machine this driver thinks it is. Delete
+    both and start again:
+      bash $SELF down && bash $SELF go"
+  ok "node A (load generator) at $LR_IP_A"
+  ok "node B (data plane)     at $LR_IP_B"
+  state_save
+
+  step "Building on both nodes"
+  vm_push_and_build "$LR_PROJECT" "$zone" "$LR_NODE_A" "$REPO"
+  vm_push_and_build "$LR_PROJECT" "$zone" "$LR_NODE_B" "$REPO"
+
+  step "Ready"
+  info "Next:  bash $SELF run --quick     (two minutes, to check the path)"
+  info "then:  bash $SELF run --full      (the real sweep)"
+  warn "The instances are billing now. bash $SELF down when you are finished."
+}
+
+# ---------------------------------------------------------------------------
+# run
+# ---------------------------------------------------------------------------
+
+NODECTL="bash ~/linerate/cloud/nodectl.sh"
+
+run_cleanup() {
+  step "Stopping what the run started"
+  gcloud_ssh_out "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_A" "$NODECTL nuke" >/dev/null 2>&1 || true
+  gcloud_ssh_out "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_B" "$NODECTL netem-clear" >/dev/null 2>&1 || true
+  ok "generator stopped, network conditions cleared"
+}
+
+# Read the sweep's log on node B until it ends, printing what is new.
+#
+# The sweep is not running inside this connection and does not care whether it
+# survives: each poll is a short session of its own, and a poll that fails is
+# retried rather than fatal. An hour-long ssh session was the single largest
+# source of lost runs in this study.
+sweep_watch() {
+  local next="$1" limit="$2"
+  local t0 now out status body count fails=0 quiet=0 vanished=0 rc
+  t0="$(date +%s)"
+  while : ; do
+    out="$(gcloud_ssh_out "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_B" \
+             "$NODECTL sweep-poll $next" 2>/dev/null || true)"
+    case "$out" in
+      STATUS*) fails=0 ;;
+      *)
+        fails=$((fails + 1))
+        if [ "$fails" -ge 20 ]; then
+          die "lost contact with $LR_NODE_B for twenty consecutive polls.
+    The sweep is detached and is probably still running. Re-attach with:
+      bash $SELF watch"
+        fi
+        warn "no answer from $LR_NODE_B (poll $fails of 20); retrying"
+        sleep "$LR_POLL"
+        continue ;;
+    esac
+    status="$(printf '%s\n' "$out" | head -1)"
+    body="$(printf '%s\n' "$out" | tail -n +2)"
+    if [ -n "$body" ]; then
+      printf '%s\n' "$body" | sed 's/^/    /'
+      quiet=0
+    else
+      quiet=$((quiet + 1))
+      now="$(date +%s)"
+      if [ $((quiet % 6)) = 0 ]; then
+        dim "still running, $(elapsed $((now - t0))) so far"
+      fi
+    fi
+    # The cursor advances by what the node says the log holds rather than by
+    # what was printed: a command substitution drops trailing blank lines, and a
+    # cursor advanced by the printed count would send them again for ever.
+    count="$(printf '%s' "$status" | sed -n 's/.*lines=\([0-9][0-9]*\).*/\1/p')"
+    if [ -n "$count" ]; then next=$((count + 1)); fi
+    case "$status" in
+      "STATUS finished rc=0"*) return 0 ;;
+      "STATUS finished rc="*)
+        rc="${status#STATUS finished rc=}"; rc="${rc%% *}"
+        case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
+        if [ "$rc" -gt 250 ]; then rc=1; fi
+        return "$rc" ;;
+      "STATUS vanished"*)
+        # The first poll can arrive before systemd has the unit running, so a
+        # single sighting of this is a race rather than a result.
+        vanished=$((vanished + 1))
+        if [ "$vanished" -ge 3 ]; then return 125; fi ;;
+      *) vanished=0 ;;
+    esac
+    now="$(date +%s)"
+    if [ $((now - t0)) -gt "$limit" ]; then return 126; fi
+    sleep "$LR_POLL"
+  done
+}
+
+cmd_run() {
+  state_load
+  [ -n "${LR_PROJECT:-}" ] || die "no session. Run bash $SELF up first."
+  local mode="--quick"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --quick) mode="--quick"; shift ;;
+      --full)  mode="--full"; shift ;;
+      *) die "unknown option for run: $1" ;;
+    esac
+  done
+  local limit
+  if [ "$mode" = "--quick" ]; then limit="${LR_QUICK_TIMEOUT:-2400}"
+  else limit="${LR_SWEEP_TIMEOUT:-21600}"; fi
+
+  step "Self-test on both nodes"
+  # Correctness before timing, on both machines. A performance study of a cipher
+  # that computes the wrong ciphertext measures nothing.
+  local node
+  for node in "$LR_NODE_A" "$LR_NODE_B"; do
+    gcloud_ssh_retry 2 "$LR_PROJECT" "$LR_ZONE" "$node" \
+      "cd ~/linerate && ./build/lr_selftest | tail -3" \
+      || die "the self-test failed on $node. Nothing was measured."
+    ok "$node passed"
+  done
+
+  step "Load generator on node A"
+  # The diagnosis above this message was fetched from the node while it was
+  # still alive; there is nothing further to go and look at, because `go` will
+  # have deleted the instance before an operator could.
+  vm_daemon_start "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_A" "load generator" \
+    "$NODECTL start-generator --port=9099" \
+    "$NODECTL generator-status" \
+    "$NODECTL diagnose-generator" \
+    || die "the load generator would not start on $LR_NODE_A. What the node said
+    about it is printed above; nothing was measured.
+    To keep the instances and try by hand instead:
+      bash $SELF up --reuse-instances && bash $SELF run --quick"
+  # E6's no-cryptography reference needs a server on the far node. Without one
+  # that row records itself unavailable, which is a smaller loss than a run that
+  # stops, so this one only warns.
+  vm_daemon_start "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_A" "iperf3 server" \
+    "$NODECTL start-iperf3" "$NODECTL iperf3-status" \
+    "$NODECTL diagnose-iperf3" \
+    || warn "no iperf3 server on $LR_NODE_A; E6's no-crypto reference will record itself unavailable"
+
+  step "Sweeping on node B"
+  info "The sweep runs detached on the node and writes to a log there. This"
+  info "terminal reads that log every ${LR_POLL}s, so a dropped connection"
+  info "costs nothing: re-attach with bash $SELF watch."
+  # start-sweep now answers with what it established rather than with what it
+  # attempted, so the answer is read. A sweep that could not start says so here,
+  # in one round trip, instead of being discovered forty minutes later as a
+  # dataset that never arrived.
+  local started
+  started="$(gcloud_ssh_out "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_B" \
+               "$NODECTL start-sweep $mode --peer=$LR_IP_A --local=$LR_IP_B" 2>/dev/null || true)"
+  case "$started" in
+    started*)       ok "sweep ${started#started }" ;;
+    already-running*) warn "a sweep was already running on $LR_NODE_B; watching that one" ;;
+    *)
+      say ""
+      info "What $LR_NODE_B says about it:"
+      gcloud_ssh_out "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_B" "$NODECTL diagnose-sweep" \
+        2>/dev/null | sed 's/^/      /' || true
+      say ""
+      run_cleanup
+      die "the sweep would not start on $LR_NODE_B: ${started:-no answer}" ;;
+  esac
+  local rc=0
+  sweep_watch 1 "$limit" || rc=$?
+  case "$rc" in
+    0)   ok "the sweep finished" ;;
+    125)
+      say ""
+      info "What $LR_NODE_B says about it:"
+      gcloud_ssh_out "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_B" "$NODECTL diagnose-sweep" \
+        2>/dev/null | sed 's/^/      /' || true
+      say ""
+      run_cleanup
+      die "the sweep is no longer running on $LR_NODE_B and left no status." ;;
+    126) run_cleanup; die "the sweep has been running for longer than the limit.
+    It is still running on the node; re-attach with bash $SELF watch, or
+    stop it with: bash $SELF down" ;;
+    *)   run_cleanup; die "the sweep failed on $LR_NODE_B with status $rc. The log above says where." ;;
+  esac
+  run_cleanup
+  info "Next: bash $SELF fetch"
+}
+
+cmd_watch() {
+  state_load
+  [ -n "${LR_PROJECT:-}" ] || die "no session. Run bash $SELF up first."
+  step "Re-attaching to the sweep on node B"
+  local rc=0
+  sweep_watch 1 "${LR_SWEEP_TIMEOUT:-21600}" || rc=$?
+  case "$rc" in
+    0)   ok "the sweep finished"; info "Next: bash $SELF fetch" ;;
+    125) die "no sweep is running on $LR_NODE_B and none left a status." ;;
+    126) die "still running; re-attach again when you want to look." ;;
+    *)   die "the sweep failed with status $rc." ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# fetch, report
+# ---------------------------------------------------------------------------
+
+cmd_fetch() {
+  state_load
+  [ -n "${LR_PROJECT:-}" ] || die "no session. Run bash $SELF up first."
+  step "Fetching the dataset from node B"
+
+  # The repository ships a dataset measured somewhere else. Fragments carry the
+  # machine that produced them and the merge refuses to mix two machines, which
+  # is correct and which would stop this run at the last step. The shipped
+  # dataset is moved aside instead, once, and the move is announced.
+  local marker="$REPO/results/.linerate-session"
+  if [ -d "$REPO/results" ] && \
+     [ "$(cat "$marker" 2>/dev/null || true)" != "${LR_CREATED:-none}" ]; then
+    local aside="$REPO/results-previous-$(date +%Y%m%d-%H%M%S)"
+    mv "$REPO/results" "$aside"
+    warn "an earlier results/ was in the way; moved to $(basename "$aside")"
+  fi
+  mkdir -p "$REPO/results"
+  printf '%s\n' "${LR_CREATED:-none}" > "$marker"
+
+  # Relative to the login user's home on the far side rather than written with a
+  # tilde: the tilde reaches scp inside quotes and is expanded, or not, by
+  # whichever shell the tunnel happens to give it.
+  gcloud_scp_from "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_B" \
+    "linerate/results/raw" "$REPO/results/" \
+    || die "could not fetch results. Is the sweep finished?"
+  gcloud_scp_from "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_B" \
+    "linerate/results/sweep.log" "$REPO/results/" >>"$LR_LOG" 2>&1 || true
+  ok "fragments in $REPO/results/raw"
+
+  running "merging"
+  "$(lr_python)" "$REPO/tools/merge_results.py" \
+    --raw "$REPO/results/raw" --out "$REPO/results/results.json" \
+    || die "the fragments would not merge. The message above says why."
+  info "Next: bash $SELF report"
+}
+
+cmd_report() {
+  step "Building the report on this Mac"
+  local py rc=0
+  py="$(lr_python)"
+  [ -f "$REPO/results/results.json" ] || die "no dataset. Run bash $SELF fetch first."
+  "$py" "$REPO/python/make_report.py" || rc=$?
+  if [ "$rc" != "0" ]; then
+    # A missing LaTeX class is not a failed study. The dataset, the figures, the
+    # macros and the tables are all written before latexmk is called, so the
+    # only thing lost is the typesetting, and it can be done later without
+    # measuring anything again.
+    if [ -f "$REPO/report/generated/macros.tex" ]; then
+      warn "the dataset, the figures, the macros and the tables were all built."
+      warn "The PDF was not. Install LaTeX and run bash $SELF report again:"
+      dim "brew install --cask basictex && eval \"\$(/usr/libexec/path_helper)\" && sudo tlmgr install latexmk acmart booktabs preprint"
+    else
+      die "the report build failed before it wrote anything. The message above says why."
+    fi
+  fi
+  step "Checking"
+  "$py" "$REPO/tools/check_wiring.py"  || warn "wiring problems, see above"
+  "$py" "$REPO/tools/check_numbers.py" || warn "numerical problems, see above"
+  if [ -f "$REPO/results/linerate-report.pdf" ]; then
+    ok "$REPO/results/linerate-report.pdf"
+  else
+    ok "$REPO/results/results.json and $REPO/results/figures"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# down, purge, status
+# ---------------------------------------------------------------------------
+
+cmd_down() {
+  state_load
+  [ -n "${LR_PROJECT:-}" ] || die "no session to tear down."
+  step "Deleting instances"
+  warn "This deletes $LR_NODE_A and $LR_NODE_B in $LR_ZONE. Anything on their"
+  warn "disks that has not been fetched will be lost."
+  confirm "Delete both instances?"
+  vm_delete "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_A"
+  vm_delete "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_B"
+  ok "instances deleted; they have stopped billing"
+  say ""
+  info "The project '$LR_PROJECT' still exists but holds no billable resources."
+  info "To remove it entirely:  gcloud projects delete $LR_PROJECT"
+  state_clear
+}
+
+cmd_purge() {
+  gcloud_check
+  state_load
+  step "Every instance on this account"
+  gcloud_purge_foreign_instances "${LR_PROJECT:-none}" "${LR_NODE_A:-linerate-a}" "${LR_NODE_B:-linerate-b}"
+}
+
+cmd_status() {
+  state_load
+  if [ -z "${LR_PROJECT:-}" ]; then
+    dim "no session"
+    return
+  fi
+  step "Session"
+  info "project  $LR_PROJECT"
+  info "zone     $LR_ZONE"
+  info "machine  $LR_MACHINE"
+  info "created  ${LR_CREATED:-unknown}"
+  say ""
+  step "Instances"
+  gc "$LR_LIST_TIMEOUT" compute instances list --project="$LR_PROJECT" \
+    --filter="tags.items=linerate" \
+    --format='table(name,zone.basename(),machineType.basename(),status,networkInterfaces[0].networkIP)' \
+    2>>"$LR_LOG" || warn "could not list instances"
+  say ""
+  local running_count
+  running_count="$(gc "$LR_LIST_TIMEOUT" compute instances list --project="$LR_PROJECT" \
+    --filter="tags.items=linerate AND status=RUNNING" --format='value(name)' \
+    2>>"$LR_LOG" | wc -l | tr -d ' ')"
+  if [ "$running_count" != "0" ]; then
+    warn "$running_count instance(s) running and billing. bash $SELF down to stop."
+  fi
+  say ""
+  step "The sweep on node B"
+  gcloud_ssh_out "$LR_PROJECT" "$LR_ZONE" "$LR_NODE_B" "$NODECTL sweep-poll 1" 2>/dev/null \
+    | head -1 | sed 's/^/    /' || warn "could not reach $LR_NODE_B"
+}
+
+# ---------------------------------------------------------------------------
+# go — the whole cycle
+# ---------------------------------------------------------------------------
+
+go_rescue() {
+  local rc=$?
+  if [ "$rc" = "0" ]; then return 0; fi
+  state_load
+  say ""
+  warn "something above did not finish."
+  # A run that stopped before any instance existed has nothing to tear down and
+  # nothing to bill, and the previous version of this said no more than that.
+  # The two commands below are what an operator actually needs at that point.
+  info "  what the cloud side looks like:  bash $SELF cloud"
+  info "  what the driver saw:             tail -40 $LR_LOG"
+  if [ -n "${LR_PROJECT:-}" ] && \
+     gcloud_instance_exists "$LR_PROJECT" "${LR_NODE_B:-linerate-b}" "${LR_ZONE:-$DEFAULT_ZONE}"; then
+    warn "The two instances still exist and are still billing."
+    info "  to look:    bash $SELF status"
+    info "  to resume:  bash $SELF run --full   (then fetch, then report)"
+    info "  to stop:    bash $SELF down"
+    info "  driver log: $LR_LOG"
+    if confirm_default_yes "Delete the two instances now?"; then
+      LR_YES=1 cmd_down || true
+    fi
+  fi
+  return 0
+}
+
+cmd_go() {
+  local project="" billing="" zone="$DEFAULT_ZONE" machine="$DEFAULT_MACHINE"
+  local keep=0 quick_only=0 purge_flag=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project) project="$2"; shift 2 ;;
+      --billing) billing="$2"; shift 2 ;;
+      --zone)    zone="$2"; shift 2 ;;
+      --machine) machine="$2"; shift 2 ;;
+      --keep)    keep=1; shift ;;
+      --quick-only) quick_only=1; shift ;;
+      --keep-other-vms) purge_flag="--keep-other-vms"; shift ;;
+      --reuse-instances) export LR_REUSE_INSTANCES=1; shift ;;
+      *) die "unknown option for go: $1" ;;
+    esac
+  done
+  [ -n "$project" ] || project="$DEFAULT_PROJECT"
+
+  gcloud_check
+  # The billing account is the one piece of information this cannot invent, so
+  # it is settled here rather than in the middle of the run: `go` promises not
+  # to ask anything after its own confirmation, and a prompt that arrives forty
+  # minutes later is worse than one that arrives now.
+  #
+  # The condition used to be 'the project does not exist'. It is now 'the
+  # project is not paying for anything', which is the condition that actually
+  # matters and which an existing project can be in — that difference is what
+  # let a run reach a firewall rule before discovering it had no billing.
+  if [ -z "$billing" ] && ! gcloud_project_billed "$project"; then
+    step "Billing"
+    info "Two virtual machines cannot be created without an open billing"
+    info "account behind the project. Settling that now rather than in the"
+    info "middle of the run."
+    billing="$(gcloud_resolve_billing "")"
+    [ -n "$billing" ] || die "no open billing account is available to this login.
+
+    To see what you have:      gcloud billing accounts list
+    To create one (the free trial covers this study, which costs about a dollar
+    of instance time):
+      https://console.cloud.google.com/billing
+
+    Then run this again, or name the account directly:
+      bash $SELF go --project $project --billing XXXXXX-XXXXXX-XXXXXX"
+    ok "billing account $billing"
+  fi
+
+  step "What this will do"
+  info "1. check this Mac, and build the analysis environment beside the repository"
+  info "2. delete every other virtual machine on this Google account, so that"
+  info "   nothing else on the same hardware perturbs the measurement"
+  info "3. create the project '$project' if it does not exist, link billing,"
+  info "   and create two $machine instances in $zone — new ones, even if"
+  info "   instances of the same name are left from an earlier attempt"
+  info "4. build the harness on both, from this working tree"
+  info "5. a two-minute smoke run, then the full sweep"
+  if [ "$quick_only" = "1" ]; then
+    info "   (--quick-only: the full sweep is skipped)"
+  fi
+  info "6. fetch the dataset here, build the figures, the tables and the PDF"
+  if [ "$keep" = "1" ]; then
+    warn "7. leave the instances running. They bill until bash $SELF down."
+  else
+    info "7. delete the instances, so they stop billing"
+  fi
+  say ""
+  info "About an hour and a quarter, and about a dollar of instance time."
+  info "Nothing is asked again after this."
+  confirm "Go?"
+  export LR_YES=1
+  trap go_rescue EXIT
+
+  cmd_preflight
+  cmd_up --project "$project" --billing "$billing" --zone "$zone" --machine "$machine" $purge_flag
+  cmd_run --quick
+  if [ "$quick_only" = "0" ]; then
+    cmd_run --full
+  fi
+  cmd_fetch
+  cmd_report
+  if [ "$keep" = "0" ]; then
+    cmd_down
+  else
+    step "Instances kept"
+    warn "They are still billing. bash $SELF down when you are finished."
+  fi
+
+  trap - EXIT
+  step "Done"
+  ok "$REPO/results/results.json          the dataset"
+  ok "$REPO/results/figures               the figures"
+  if [ -f "$REPO/results/linerate-report.pdf" ]; then
+    ok "$REPO/results/linerate-report.pdf   the report"
+    if [ "$(uname -s)" = "Darwin" ]; then
+      open "$REPO/results/linerate-report.pdf" 2>/dev/null || true
+    fi
+  else
+    warn "no PDF: LaTeX is missing here. Everything else was produced, and"
+    warn "bash $SELF report typesets it once LaTeX is installed."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+
+[ $# -ge 1 ] || { usage; exit 64; }
+sub="$1"; shift
+case "$sub" in
+  go)        cmd_go "$@" ;;
+  up)        cmd_up "$@" ;;
+  run)       cmd_run "$@" ;;
+  watch)     cmd_watch "$@" ;;
+  fetch)     cmd_fetch "$@" ;;
+  report)    cmd_report "$@" ;;
+  down)      cmd_down "$@" ;;
+  purge)     cmd_purge "$@" ;;
+  status)    cmd_status "$@" ;;
+  doctor)    cmd_doctor "$@" ;;
+  cloud)     cmd_cloud "$@" ;;
+  preflight) cmd_preflight "$@" ;;
+  -h|--help|help) usage ;;
+  *) die "unknown command '$sub'. Try: bash $SELF --help" ;;
+esac

@@ -1,0 +1,95 @@
+\section{The cost model and the crossover payload}
+\label{sec:costmodel}
+
+\begin{figure*}[t]
+\centering
+\lrfigure{cost_model}{\linewidth}
+\caption{Cycles per packet against payload size, with the fitted
+$C(s)=a+b\,s$. Bars are bootstrap intervals on the median of \envReplicates\
+replicates; hollow markers are points the stability gate excluded from the fit.
+Left, the hardware crypto instructions available; right, the same measurement
+with them masked in both implementations.}
+\label{fig:costmodel}
+\end{figure*}
+
+\begin{table*}[t]
+\caption{Fitted cost model. $a$ is the payload-independent cost, $b$ the cost
+per payload byte over a path that crosses the cipher twice, and $s^{*}=a/b$ the
+crossover payload with its 95\% interval propagated through the parameter
+covariance.}
+\label{tab:costmodel}
+\centering\footnotesize
+\input{generated/table_cost_model}
+\end{table*}
+
+The sweep comprises \eOneUnits\ distinct configurations.
+Figure~\ref{fig:costmodel} shows it and Table~\ref{tab:costmodel} the fits. The
+relationship is linear over the whole payload range for every cell but one. For
+\bestCipher\ with the hardware instructions masked, \fitCurvatureLrAesGcmMasked.
+
+The fits are weighted by the inverse variance of each point rather than left
+unweighted. Small payloads are noisier, because that is where $a$ dominates and
+where scheduling noise lands, and an unweighted fit would let the noisiest
+points set the intercept, which is the parameter the whole study turns on. The
+interval on $s^{*}$ is propagated through the covariance of $a$ and $b$ rather
+than obtained by dividing their separate intervals. The two are strongly
+anticorrelated, since a fit that raises the intercept lowers the slope, and
+ignoring that inflates the interval several-fold.
+
+\begin{figure*}[t]
+\centering
+\lrfigure{crossover}{\linewidth}
+\caption{The crossover payload for each cell of the design, with its 95\%
+interval. The dashed line is the largest payload this data plane can carry
+inside an MTU: a crossover to the right of it means the fixed cost dominates at
+every size the data plane can send.}
+\label{fig:crossover}
+\end{figure*}
+
+\noindent\textbf{The headline.}
+With hardware crypto available, \bestCipher\ has $a = \bestA$ cycles and
+$b = \bestB$ cycles per payload byte, giving $s^{*} = \bestSStar$ bytes. The
+largest payload this data plane can carry inside an MTU is \protoMaxPayload\
+bytes, so the crossover lies outside the reachable range by a factor of more
+than two. The fixed cost therefore dominates at every payload size this
+configuration can send, and no improvement to the cipher can change its
+throughput by much: the packet costs, not the byte. Where $s^{*}$ falls inside
+the range instead, as it does for \texttt{lr-chacha20-poly1305} in
+Table~\ref{tab:costmodel}, the crossover is reachable and the choice of cipher
+starts to matter above it.
+
+\noindent\textbf{Reading $a$ across experiments.}
+Table~\ref{tab:costmodel} obtains $a$ from a fit across the whole payload sweep,
+while Table~\ref{tab:controls} and Table~\ref{tab:virtualization} report a cost
+measured at one configuration. The three are separate experiments on the same
+host and their values for the same cipher agree to about one per cent, which is
+the reproducibility of the harness rather than a discrepancy. Comparisons in
+this report are always drawn within one experiment.
+
+\noindent\textbf{Our implementations against OpenSSL's.}
+The AES-256-GCM written for this study reaches $b$ a factor of \simdVsOpensslB\
+of OpenSSL's, with a fixed cost a factor of \simdVsOpensslA\ of it. Where that
+factor exceeds one it has a specific cause, and we state it rather than
+attributing it to implementation quality in general. OpenSSL's assembly
+interleaves eight AES blocks using the vector AES extensions, while the
+implementation here interleaves four using the 128-bit instructions. The
+stitched inner loop, which computes counter-mode encryption and the GHASH in one
+pass over the data rather than two, recovers most but not all of that
+difference. Our implementation is checked byte for byte against OpenSSL at every
+length in the sweep, so the residual is a property of the instruction selection
+and not of correctness.
+
+The comparison is useful in both directions. It bounds how much of the measured
+$b$ is intrinsic to the algorithm rather than to one library, and it puts a
+number on what the wider vector path buys, which is invisible when only one
+implementation is measured.
+
+\noindent\textbf{Masking the accelerator.}
+The masked arm is not a hypothetical. It is what the same code does on a machine
+without the instructions, which is what an embedded or older deployment target
+looks like. The change in $b$ between the two arms is the whole contribution of
+the hardware accelerator to the bulk term, and Table~\ref{tab:costmodel} shows
+it spanning more than an order of magnitude. The change in $a$ is smaller. It is
+the accelerator's contribution to the cipher's per-message setup, the part that
+does not scale with payload and therefore does not go away by sending larger
+packets.

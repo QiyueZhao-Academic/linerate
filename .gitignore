@@ -1,0 +1,15 @@
+build/
+results/
+report/generated/
+report/figures/
+report/*.aux
+report/*.log
+report/*.out
+report/*.fls
+report/*.fdb_latexmk
+report/*.bbl
+report/*.blg
+report/*.pdf
+__pycache__/
+*.pyc
+.DS_Store

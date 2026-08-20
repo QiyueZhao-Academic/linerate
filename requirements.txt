@@ -1,0 +1,8 @@
+# Analysis dependencies. The harness itself needs none of these: it is C++ and
+# writes JSON. These are for the machine that analyses and typesets, which is
+# often not the machine that measured.
+
+numpy>=1.24          # the fits, and every array in the figures
+matplotlib>=3.7      # the figures
+scikit-learn>=1.3    # the admission model in E9; without it E9 records itself
+                     # as unavailable and everything else still runs

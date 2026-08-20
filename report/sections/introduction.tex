@@ -1,0 +1,67 @@
+\section{Introduction}
+
+A tunnel endpoint that terminates one security association and originates
+another pays two kinds of cost for every packet it forwards. One kind does not
+depend on how large the packet is: the system calls that move it across the
+kernel boundary, the header parse, the anti-replay check of ESP and its
+descendants \cite{rfc4303}, the nonce derivation, and the cipher's own
+per-message setup and teardown. The other kind is proportional to the payload,
+and covers the bulk encryption and decryption together with the memory traffic
+that feeds them.
+
+Writing the first as $a$ cycles and the second as $b$ cycles per payload byte
+gives
+%
+\begin{equation}
+C(s) = a + b\,s ,
+\qquad
+s^{*} = \frac{a}{b} ,
+\label{eq:model}
+\end{equation}
+%
+where $s^{*}$ is the payload at which the two halves are equal. Below $s^{*}$ a
+packet costs mostly what it costs to be a packet at all; above it, mostly what
+it costs to carry that many bytes. The two sides call for opposite work. Below
+$s^{*}$, the useful optimisations are batching and the removal of system calls.
+Above it, they are a faster cipher or fewer passes over the payload.
+
+The ratio is more portable than either term. Both $a$ and $b$ are counts of
+cycles, and both scale with the clock, so $s^{*}$ survives clock scaling and can
+be compared across machines whose absolute numbers cannot. That portability is
+why this study reports it.
+
+\noindent\textbf{What is measured here.}
+The data plane is a decrypt-then-re-encrypt forwarding element, so every payload
+byte crosses the cipher twice. Crossing twice makes $b$ large enough to separate
+cleanly from $a$, and the report states the factor of two rather than folding it
+away. Four factors are varied against it: the cipher, in four levels; the
+presence of the hardware crypto instructions; the transport, in four levels
+whose system-call rates differ by construction; and the payload size, over a
+grid dense at the small end where $a$ dominates.
+
+\noindent\textbf{Two implementations of each cipher.}
+For AES-256-GCM \cite{nistgcm} and ChaCha20-Poly1305 \cite{rfc8439} we measure
+OpenSSL's implementation and one written for this study. Ours uses AES-NI with a
+PCLMULQDQ GHASH \cite{gueron2010} and a stitched single-pass
+counter-mode-and-hash inner loop \cite{krasnov2017} on x86-64, ARMv8 AES with
+PMULL on \texttt{aarch64}, and ChaCha20 vectorised with AVX2 or NEON. Both agree
+with OpenSSL byte for byte at every length in the sweep, which the self-test
+checks before any timing run. A second implementation is what separates ``this
+cipher costs $x$'' from ``this library's version of this cipher costs $x$'', and
+the gap between the two is reported rather than hidden.
+
+\noindent\textbf{Contributions.}
+\begin{itemize}
+  \item A measured cost model for an encrypted UDP data plane, with the
+        crossover payload $s^{*}$ and its confidence interval, for four cipher
+        implementations with hardware crypto present and masked.
+  \item A direct measurement of what the system-call boundary contributes to
+        $a$, taken from a submission path that issues no system calls
+        \cite{iouring} rather than extrapolated from a batching curve.
+  \item The same fixed-versus-marginal decomposition applied to two further
+        boundaries: the isolation layer around a virtual network function, and
+        the bus between a CPU and a GPU.
+  \item An artefact that refuses to produce a measurement on a host that cannot
+        hold one, records why every unavailable experiment was unavailable, and
+        generates every number in this text from the dataset.
+\end{itemize}
