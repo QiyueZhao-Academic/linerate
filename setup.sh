@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # setup.sh — configure and build, on either kind of host.
 #
-# Works on macOS and on Linux. On macOS it produces a build that self-tests and
-# typesets; it will not measure, because the harness classifies macOS as a
+# Works on macOS and on Linux. On macOS it produces a build that self-tests;
+# it will not measure, because the harness classifies macOS as a
 # development host and refuses to. That refusal is the point: an unpinnable
 # thread on a machine with a non-invariant counter can produce a number, and a
 # number produced that way is worse than no number at all.
@@ -72,7 +72,7 @@ if [ "$UNAME" = "Darwin" ]; then
   say "  ./mac/linerate up        create two VMs and build there"
   say ""
   say "  This Mac will not measure: the harness classifies it as a development"
-  say "  host. It builds, drives the VMs, and typesets the report."
+  say "  host. It builds, drives the VMs, and draws the figures."
 else
   say "  ./run.sh --quick         a two-minute smoke run"
   say "  ./run.sh                 the full sweep"

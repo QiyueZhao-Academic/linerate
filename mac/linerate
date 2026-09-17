@@ -14,7 +14,7 @@
 #   ./mac/linerate run     run the sweep on the VMs
 #   ./mac/linerate watch   re-attach to a sweep already running
 #   ./mac/linerate fetch   bring the dataset back to this machine
-#   ./mac/linerate report  build figures and the PDF here
+#   ./mac/linerate figures draw the figures here
 #   ./mac/linerate down    delete the VMs, so they stop billing
 #
 # Nothing about the author's Google account, project or billing is in this
@@ -22,10 +22,10 @@
 # them, and remembers them in ~/.linerate/state.env — outside the repository, so
 # they cannot be committed.
 #
-# The Mac never measures. It creates, builds, drives, collects and typesets;
-# every cycle count comes from a Linux VM. That split is enforced in the harness
-# itself, which refuses to write a measurement from a host it classifies as
-# 'development'.
+# The Mac never measures. It creates, builds, drives, collects and draws the
+# figures; every cycle count comes from a Linux VM. That split is enforced in
+# the harness itself, which refuses to write a measurement from a host it
+# classifies as 'development'.
 #
 # Two properties of this driver are worth knowing before reading it. Nothing it
 # starts on a node is left attached to the ssh session that started it, and
@@ -72,7 +72,7 @@ linerate — measure the per-packet cost of an encrypted UDP data plane on two V
   bash $SELF run [--quick] [--full]
   bash $SELF watch
   bash $SELF fetch
-  bash $SELF report
+  bash $SELF figures
   bash $SELF down
   bash $SELF purge
   bash $SELF status
@@ -80,8 +80,9 @@ linerate — measure the per-packet cost of an encrypted UDP data plane on two V
   bash $SELF cloud [--project ID]
 
 'go' is the whole cycle: check this Mac, delete other instances on the account,
-create the project and two VMs, build, smoke-test, sweep, fetch, typeset, and
-delete the VMs. It asks once, at the start, and then does not stop to ask again.
+create the project and two VMs, build, smoke-test, sweep, fetch, draw the
+figures, and delete the VMs. It asks once, at the start, and then does not stop
+to ask again.
 
 Options for 'go'
   --keep          Leave the two instances running at the end. They bill until
@@ -156,10 +157,10 @@ cmd_preflight() {
   fi
 
   # A tree unzipped over an older one keeps whatever the older one had that the
-  # new archive does not, and for this project that is a dataset and a PDF from
-  # a machine nobody here measured. Moving it aside now, rather than at fetch
-  # time, means there is no report in the tree at any point during a run except
-  # the one this run produces.
+  # new archive does not, and for this project that is a dataset and figures
+  # from a machine nobody here measured. Moving it aside now, rather than at
+  # fetch time, means there are no results in the tree at any point during a
+  # run except the ones this run produces.
   if [ -d "$REPO/results" ] && [ ! -f "$REPO/results/.linerate-session" ]; then
     local aside="$REPO/results-previous-$(date +%Y%m%d-%H%M%S)"
     mv "$REPO/results" "$aside"
@@ -186,14 +187,6 @@ cmd_preflight() {
     matplotlib. Delete it and run this again:  rm -rf $ENVDIR/venv"
   ok "analysis environment $ENVDIR/venv"
 
-  if command -v latexmk >/dev/null 2>&1; then
-    ok "latexmk"
-  else
-    warn "latexmk is missing: the dataset, the figures and the macros will all"
-    warn "be produced, and only the PDF will not. To add it:"
-    dim "brew install --cask basictex && eval \"\$(/usr/libexec/path_helper)\" && sudo tlmgr install latexmk acmart booktabs preprint"
-  fi
-
   gcloud_check
   ok "gcloud, signed in as $(gcloud_account)"
 }
@@ -201,7 +194,7 @@ cmd_preflight() {
 cmd_doctor() {
   step "Checking this Mac"
   say ""
-  info "This machine builds, drives and typesets. It never measures:"
+  info "This machine builds, drives and draws the figures. It never measures:"
   info "the harness classifies macOS as a development host and refuses to"
   info "write a measurement from one."
   say ""
@@ -214,11 +207,9 @@ cmd_doctor() {
   else
     warn "gcloud is not installed: https://cloud.google.com/sdk/docs/install"
   fi
-  for t in python3 latexmk; do
-    if command -v "$t" >/dev/null 2>&1; then ok "$t"; else
-      warn "$t is missing; $( [ "$t" = latexmk ] && echo 'the PDF cannot be built here' || echo 'the analysis cannot run here')"
-    fi
-  done
+  if command -v python3 >/dev/null 2>&1; then ok "python3"; else
+    warn "python3 is missing; the analysis cannot run here"
+  fi
   if [ -x "$ENVDIR/venv/bin/python3" ]; then ok "analysis environment $ENVDIR/venv"
   else dim "no analysis environment yet; go or preflight creates one"; fi
   if [ -f "$LR_STATE" ]; then
@@ -629,7 +620,7 @@ cmd_watch() {
 }
 
 # ---------------------------------------------------------------------------
-# fetch, report
+# fetch, figures
 # ---------------------------------------------------------------------------
 
 cmd_fetch() {
@@ -665,36 +656,19 @@ cmd_fetch() {
   "$(lr_python)" "$REPO/tools/merge_results.py" \
     --raw "$REPO/results/raw" --out "$REPO/results/results.json" \
     || die "the fragments would not merge. The message above says why."
-  info "Next: bash $SELF report"
+  info "Next: bash $SELF figures"
 }
 
-cmd_report() {
-  step "Building the report on this Mac"
-  local py rc=0
+cmd_figures() {
+  step "Drawing the figures on this Mac"
+  local py
   py="$(lr_python)"
   [ -f "$REPO/results/results.json" ] || die "no dataset. Run bash $SELF fetch first."
-  "$py" "$REPO/python/make_report.py" || rc=$?
-  if [ "$rc" != "0" ]; then
-    # A missing LaTeX class is not a failed study. The dataset, the figures, the
-    # macros and the tables are all written before latexmk is called, so the
-    # only thing lost is the typesetting, and it can be done later without
-    # measuring anything again.
-    if [ -f "$REPO/report/generated/macros.tex" ]; then
-      warn "the dataset, the figures, the macros and the tables were all built."
-      warn "The PDF was not. Install LaTeX and run bash $SELF report again:"
-      dim "brew install --cask basictex && eval \"\$(/usr/libexec/path_helper)\" && sudo tlmgr install latexmk acmart booktabs preprint"
-    else
-      die "the report build failed before it wrote anything. The message above says why."
-    fi
-  fi
+  "$py" "$REPO/python/make_figures.py" \
+    || die "the figures could not be drawn. The message above says why."
   step "Checking"
   "$py" "$REPO/tools/check_wiring.py"  || warn "wiring problems, see above"
-  "$py" "$REPO/tools/check_numbers.py" || warn "numerical problems, see above"
-  if [ -f "$REPO/results/linerate-report.pdf" ]; then
-    ok "$REPO/results/linerate-report.pdf"
-  else
-    ok "$REPO/results/results.json and $REPO/results/figures"
-  fi
+  ok "$REPO/results/results.json and $REPO/results/figures"
 }
 
 # ---------------------------------------------------------------------------
@@ -774,7 +748,7 @@ go_rescue() {
      gcloud_instance_exists "$LR_PROJECT" "${LR_NODE_B:-linerate-b}" "${LR_ZONE:-$DEFAULT_ZONE}"; then
     warn "The two instances still exist and are still billing."
     info "  to look:    bash $SELF status"
-    info "  to resume:  bash $SELF run --full   (then fetch, then report)"
+    info "  to resume:  bash $SELF run --full   (then fetch, then figures)"
     info "  to stop:    bash $SELF down"
     info "  driver log: $LR_LOG"
     if confirm_default_yes "Delete the two instances now?"; then
@@ -842,7 +816,7 @@ cmd_go() {
   if [ "$quick_only" = "1" ]; then
     info "   (--quick-only: the full sweep is skipped)"
   fi
-  info "6. fetch the dataset here, build the figures, the tables and the PDF"
+  info "6. fetch the dataset here and draw the figures"
   if [ "$keep" = "1" ]; then
     warn "7. leave the instances running. They bill until bash $SELF down."
   else
@@ -862,7 +836,7 @@ cmd_go() {
     cmd_run --full
   fi
   cmd_fetch
-  cmd_report
+  cmd_figures
   if [ "$keep" = "0" ]; then
     cmd_down
   else
@@ -874,15 +848,6 @@ cmd_go() {
   step "Done"
   ok "$REPO/results/results.json          the dataset"
   ok "$REPO/results/figures               the figures"
-  if [ -f "$REPO/results/linerate-report.pdf" ]; then
-    ok "$REPO/results/linerate-report.pdf   the report"
-    if [ "$(uname -s)" = "Darwin" ]; then
-      open "$REPO/results/linerate-report.pdf" 2>/dev/null || true
-    fi
-  else
-    warn "no PDF: LaTeX is missing here. Everything else was produced, and"
-    warn "bash $SELF report typesets it once LaTeX is installed."
-  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -895,7 +860,7 @@ case "$sub" in
   run)       cmd_run "$@" ;;
   watch)     cmd_watch "$@" ;;
   fetch)     cmd_fetch "$@" ;;
-  report)    cmd_report "$@" ;;
+  figures)   cmd_figures "$@" ;;
   down)      cmd_down "$@" ;;
   purge)     cmd_purge "$@" ;;
   status)    cmd_status "$@" ;;

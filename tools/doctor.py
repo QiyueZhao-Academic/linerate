@@ -65,7 +65,6 @@ def check_toolchain(r: Report) -> None:
     r.add("C++ compiler", OK if cxx else BAD, cxx or "not found",
           "" if cxx else "nothing can be built")
     for tool, consequence in [
-        ("latexmk", "the report cannot be typeset; the dataset is still produced"),
         ("mpicxx", "the cross-node scaling experiment is skipped"),
         ("nvcc", "the GPU experiment is skipped"),
         ("iperf3", "the network baseline is skipped"),
@@ -140,7 +139,7 @@ def check_cpu(r: Report) -> None:
 def check_kernel(r: Report) -> None:
     if platform.system() != "Linux":
         r.add("host class", WARN, platform.system(),
-              "this host is 'development': it builds, self-tests and typesets, "
+              "this host is 'development': it builds, self-tests and analyses, "
               "but the harness will refuse to write a measurement from it")
         return
     cmdline = _read("/proc/cmdline")

@@ -23,8 +23,8 @@ dataset are not comparable and the merger will not combine them.
 
 Every experiment block has `available`. When it is `false`, the block carries
 `reason` and nothing else. Consumers must check `available` before reading
-anything else, and the report renders the reason where the figure would have
-gone.
+anything else, and the figure that block would have fed is skipped with that
+reason.
 
 ## `environment`
 
@@ -93,8 +93,8 @@ Each point:
 | `cycles_replicates` | every replicate, so a reader can re-derive the summary |
 | `error` | empty on success |
 
-**`anchor_ok: false` means the sweep is void.** `tools/check_numbers.py` fails
-when a report is built from a dataset whose anchor check failed.
+**`anchor_ok: false` means the sweep is void.** E1 prints `SWEEP VOID`, and
+nothing drawn from such a dataset is a result.
 
 ## `e2` — scaling, and `e2_mpi`
 
@@ -223,8 +223,7 @@ demonstrates that latency depends on load.
 ## Stability of this contract
 
 Renaming a field silently is the failure mode this document exists to prevent:
-the Python reads a missing key as zero, nothing crashes, and the report prints a
+the Python reads a missing key as zero, nothing crashes, and a figure draws a
 plausible wrong number. `tools/check_wiring.py` catches the cases it can see
-statically — a fragment nobody writes, a macro nobody defines, a figure nobody
-can draw, a protocol constant that drifted from the header. Anything else is
-caught by `tools/check_numbers.py` re-deriving macros from the dataset.
+statically — a fragment nobody writes, an experiment nobody dispatches, a cipher
+the factory cannot build, a protocol constant that drifted from the header.

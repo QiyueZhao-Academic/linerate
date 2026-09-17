@@ -13,7 +13,7 @@ once per machine; skip them if Homebrew and the toolchain are already there.
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-brew install cmake openssl@3 && brew install --cask google-cloud-sdk basictex && eval "$(/usr/libexec/path_helper)" && sudo tlmgr update --self && sudo tlmgr install latexmk acmart booktabs preprint
+brew install cmake openssl@3 && brew install --cask google-cloud-sdk
 
 gcloud auth login
 
@@ -35,20 +35,17 @@ about to do — and after you answer it, it does not stop to ask again:
    `c3-standard-4` instances in `europe-west1-b`
 4. copies this working tree to both and builds it there
 5. runs a two-minute smoke sweep, then the real one
-6. brings the dataset back, draws the figures, generates the macros and tables,
-   and typesets the PDF
+6. brings the dataset back and draws the figures
 7. deletes the two instances, so they stop billing
 
-About an hour and a quarter, and about a dollar of instance time. The PDF opens
-by itself at the end; it is at `~/Networks-HPC/linerate/results/linerate-report.pdf`
-and the dataset it was built from is at `results/results.json`.
+About an hour and a quarter, and about a dollar of instance time. At the end the
+figures are in `~/Networks-HPC/linerate/results/figures/` and the dataset they
+were drawn from is at `results/results.json`.
 
-**Nothing in this archive is a report.** There is no `results/`, no
-`report/generated/`, no `report/figures/` and no PDF until a run produces them:
-the figures are drawn from the dataset that run measured, every quantity in the
-prose is a macro generated from the same file, and the PDF is typeset last, out
-of both. So there is never a document in the tree whose numbers came from
-somewhere else, and a PDF that exists is one this machine measured.
+**Nothing in this archive is a result.** There is no `results/` and no figure
+until a run produces them: the figures are drawn from the dataset that run
+measured. So there is never a figure in the tree whose numbers came from
+somewhere else, and a figure that exists is one this machine measured.
 
 `bash …/mac/linerate` rather than `./mac/linerate` because a zip archive does
 not carry the Unix execute bit. The first thing `go` does is repair that, so
@@ -56,7 +53,7 @@ not carry the Unix execute bit. The first thing `go` does is repair that, so
 
 The `rm -rf` before the unzip is deliberate. Unpacking over an older tree keeps
 every file the older one had that the new archive does not, which for this
-project means a dataset and a PDF measured on a machine that is not yours. The
+project means a dataset and figures measured on a machine that is not yours. The
 environment directory `~/Networks-HPC/linerate-env` is outside the repository
 and survives, so nothing is downloaded twice.
 
@@ -110,7 +107,7 @@ cd ~/Networks-HPC/linerate
 ./mac/linerate run --full             # the real sweep, about three quarters of an hour
 ./mac/linerate watch                  # re-attach to a sweep already running
 ./mac/linerate fetch                  # bring the dataset back and merge it
-./mac/linerate report                 # figures, macros, tables, PDF
+./mac/linerate figures                # E9 and the figures
 ./mac/linerate status                 # what exists and what is billing
 ./mac/linerate down                   # delete the instances
 ./mac/linerate purge                  # delete every other instance on the account
@@ -159,7 +156,7 @@ The harness classifies macOS as a `development` host and refuses to write a
 measurement from one. Thread affinity here is a hint rather than an instruction,
 and a per-packet cycle count from an unpinned thread is worse than no number
 because it looks like data. So the Mac creates the instances, pushes the working
-tree, drives the sweep, collects the dataset and typesets it. The two Ubuntu
+tree, drives the sweep, collects the dataset and draws the figures. The two Ubuntu
 24.04 VMs measure, and they compile their own binaries; nothing is
 cross-compiled from the M1.
 
@@ -181,7 +178,7 @@ that the tree is intact — run `./setup.sh`.
     ==> e1 … controls           each writes results/raw/<name>.json
     ==> merging                 "merged N fragment(s)" plus every unavailable reason
 ==> Fetching the dataset        scp, then merge here
-==> Building the report         figures, macros, tables, PDF, then the two checks
+==> Drawing the figures         E9, the figures, then the wiring check
 ```
 
 An experiment that prints `did not complete; its fragment records why` is not a
@@ -334,27 +331,13 @@ and repairs the mode on the way past.
 Homebrew's Python refuses to be installed into. Nothing in the five lines
 installs into it: `go` builds a virtual environment at
 `~/Networks-HPC/linerate-env/venv` and uses that interpreter for every analysis
-step. If you are running `python3 python/make_report.py` by hand, use
+step. If you are running `python3 python/make_figures.py` by hand, use
 `~/Networks-HPC/linerate-env/venv/bin/python3` instead.
 
 ### `xcrun: error: invalid active developer path`
 
 The command line tools are missing or were invalidated by a system update:
 `xcode-select --install`.
-
-### `latexmk not found` or `acmart.cls not found`
-
-The dataset, the figures, the macros and the tables are all still produced and
-only the PDF is missing; the run does not stop. Install the LaTeX line from the
-sequence above and run `./mac/linerate report` again — nothing is measured a
-second time.
-
-Installing the class used to be necessary and not sufficient. A `latexmk` run
-that failed leaves `.fdb_latexmk`, `.aux` and `.fls` describing a document that
-was never built, and it believes them next time; the second run therefore failed
-too, which reads as a second, different problem. `make_report.py` now discards
-that state and builds once more before reporting anything, so installing the
-class is enough. By hand the equivalent is `latexmk -C` in `report/`.
 
 ### `The resource 'projects/...' was not found` while creating the firewall rule
 
@@ -574,8 +557,8 @@ The load generator shares a core with the data plane, so the delays are
 scheduling latency rather than queueing delay. The two-node topology
 `./mac/linerate run` sets up avoids this; seeing it there means the generator
 did not come up on node A, and `/tmp/linerate-loadgend.log` on that node says
-why. E9 refuses to fit on such a dataset, which is why the admission macros
-render as em dashes.
+why. E9 refuses to fit on such a dataset, which is why its fragment records
+itself unavailable and the admission figure is skipped.
 
 ### `sqpoll_contends_for_cpu: true`
 
@@ -584,18 +567,11 @@ data plane rather than bypassing anything. The difference between `posix` and
 `uring-sqpoll` bounds nothing on such a host and the report says so. Use an
 instance with at least four vCPUs — the default already does.
 
-### `check_numbers.py` reports a literal in the prose
-
-Someone typed a measured number into a section instead of using a macro. Add the
-quantity to `build_macros()` in `python/lr/report.py` and reference it. If the
-numeral is structural rather than measured — a count of factor levels, an RFC
-number — add it to `ALLOWED_LITERALS` with the reason.
-
-### `check_wiring.py` reports a missing macro or fragment
+### `check_wiring.py` reports a missing fragment
 
 Something was renamed on one side of a boundary. The message names both sides.
 This is the check that exists because the failure mode is silent: a missing key
-reads as zero and the report prints a plausible wrong number.
+reads as zero and a figure draws a plausible wrong number.
 
 ## First run, on one Linux machine
 
@@ -615,7 +591,7 @@ python3 tools/doctor.py               # what will and will not run here
 ./build/lr_bench --help
 ./build/lr_bench e3 --out=results/raw --reps=11 --verbose
 python3 tools/merge_results.py --raw results/raw --out results/results.json
-python3 python/make_report.py
+python3 python/make_figures.py
 ```
 
 ## Two nodes by hand
@@ -641,7 +617,7 @@ afterwards.
 ```bash
 ./mac/linerate down                      # the instances, and the billing
 make clean                               # the build
-make distclean                           # the build, the results, the report
+make distclean                           # the build and the results
 rm -f ~/.linerate/state.env              # the session
 gcloud projects delete <your project>    # only if you want the project gone too
 ```
@@ -650,26 +626,30 @@ gcloud projects delete <your project>    # only if you want the project gone too
 
 ## What changed in this revision
 
-The run that produced the log this revision was made from stopped at
-`load generator did not come up on linerate-a`, with an empty
-`/tmp/linerate-loadgend.log`. Seventeen files changed; the reasoning behind each
-is in the file it changed, and this is the index.
+The report is no longer generated. Every experiment still runs and writes its
+fragment, the fragments are still merged into `results/results.json`, E9 is still
+fitted, and every figure is still drawn into `results/figures/`. What is gone is
+the part that turned the dataset into LaTeX macros and tables and typeset a PDF,
+so no machine in this study needs LaTeX any more. Nothing that measures or draws
+changed: no C++, CUDA, CMake or `cloud/` file, and neither `python/lr/figures.py`,
+`python/lr/model.py` nor `python/lr/admission.py`.
 
-| File | What was wrong |
+| File | What changed |
 | --- | --- |
-| `cloud/nodectl.sh` | `systemd-run` returns when a unit is accepted, not when its process runs. A zero was read as *running*, the `setsid` fallback only covered a unit that was *refused*, and `--collect` discarded the evidence. Every spawn is now verified, falls through on failure, and records why. |
-| `src/apps/lr_loadgend.cpp` | `signal(2)` sets `SA_RESTART`, so `SIGTERM` never interrupted `accept()`; `listen()` was unchecked; a failed echo bind was silent; a unit that could not start reported zero packets rather than a reason. |
-| `cloud/remote-sweep.sh` | The core loop rewrote `e5_latency.json` after the netem conditions had been folded into it, so a full sweep reached the analysis with one condition instead of five and E9 declined to fit. |
-| `python/make_report.py` | A failed `latexmk` leaves state it believes next time, so installing the missing class was not enough to make the next run work. |
-| `tools/merge_results.py` | A fragment written while `environment.json` was absent looked like a second machine, and the merge refused with a confident wrong diagnosis. |
-| `tools/doctor.py` | Reported no interfaces on a host without `iproute2`, while the harness on the same host reported `eth0`. |
-| `tools/check_numbers.py` | Two whitelist entries were duplicate dict keys, so their stated reasons were silently discarded. |
-| `mac/linerate`, `mac/lib/vm.sh` | The failure message named a log on an instance the next prompt deleted. The diagnosis is now fetched and printed while the node still exists, and `start-sweep`'s answer is read rather than discarded. |
-| `include/lr/ctrl.hpp`, `src/core/ctrl.cpp`, `src/bench/bench.cpp`, `src/bench/exp_e5_latency.cpp` | Carry the generator's reason for a unit that produced nothing, so a wrong cipher name stops reading as a measured zero. |
-| `RUNBOOK.md`, `docs/environment.md`, `docs/limitations.md`, `docs/mac-workflow.md` | Descriptions of mechanisms that had changed. |
+| `report/` | Removed: the LaTeX source, its sections and the bibliography. |
+| `python/lr/report.py` | Removed: it turned `results.json` into LaTeX macros and tables. |
+| `tools/check_numbers.py` | Removed: it checked the report's prose and macros against the dataset. |
+| `python/make_report.py` → `python/make_figures.py` | Renamed, and reduced to E9 followed by the figures. The macros, the tables, `latexmk` and the PDF are gone, and so are `--report-dir` and `--no-pdf`. |
+| `tools/check_wiring.py` | The macro and figure-inclusion checks are gone, since both compared the code against `report/`. The experiment, fragment, protocol-constant and cipher checks are unchanged. |
+| `mac/linerate` | `report` is now `figures`, and `go`, `fetch` and the rescue message name it. `preflight` and `doctor` no longer look for `latexmk`, and `go` no longer looks for a PDF. |
+| `run.sh`, `Makefile` | The report step is the figures step (`make figures`), `check_numbers.py` is not called, and `distclean` removes only `build/` and `results/`. |
+| `tools/doctor.py`, `setup.sh`, `requirements.txt`, `mac/lib/vm.sh`, `.gitignore` | No `latexmk` probe, no typesetting, no `report/` paths. |
+| `README.md`, `RUNBOOK.md`, `docs/mac-workflow.md`, `docs/methodology.md`, `docs/schema.md` | Descriptions of the report pipeline. The Mac setup line no longer installs BasicTeX. |
 
 Verified on x86-64 Linux: clean `setup.sh`, self-test, `run.sh --quick`, merge,
-figures, macros, PDF, `check_wiring.py`, `check_numbers.py` (113 macros). The
-start path was exercised with the control port deliberately occupied, which now
-puts `bind 9099: Address already in use` in the log and on the operator's screen
-instead of leaving both empty.
+E9, eight figures, `check_wiring.py`. One dataset drawn by the old
+`make_report.py` and by `make_figures.py` gives byte-identical figures (with
+`SOURCE_DATE_EPOCH` fixed, since a PDF otherwise records when it was drawn) —
+both with E9 unavailable and, on a dataset with five network conditions, with E9
+fitted and the admission figure drawn. `go` ran through `preflight`, `figures`
+and `down` with the cloud calls stubbed.

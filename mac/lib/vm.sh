@@ -180,7 +180,7 @@ vm_push_and_build() {
   # the node as a second copy of every source file with a name the build ignores
   # and a reader does not.
   COPYFILE_DISABLE=1 tar --exclude='.git' --exclude='build' --exclude='results' \
-      --exclude='results-*' --exclude='*.o' --exclude='report/generated' \
+      --exclude='results-*' --exclude='*.o' \
       -czf /tmp/linerate-src.tgz -C "$(dirname "$repo")" "$(basename "$repo")"
   gcloud_scp_to "$project" "$zone" "$name" /tmp/linerate-src.tgz "/tmp/linerate-src.tgz" \
     >>"$LR_LOG" 2>&1 || die "could not copy the source to $name"

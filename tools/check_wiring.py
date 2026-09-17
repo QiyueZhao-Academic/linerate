@@ -3,7 +3,7 @@
 
 A project this size drifts in a specific way: a field is renamed in the C++, the
 Python that reads it keeps working because the key is simply absent and reads as
-zero, and the report quietly prints a plausible wrong number. Nothing crashes.
+zero, and a figure quietly draws a plausible wrong number. Nothing crashes.
 This script exists to make that class of drift loud.
 
 It checks, without running the harness:
@@ -13,12 +13,6 @@ It checks, without running the harness:
 
   every fragment producer — C++, shell script or Python — writes a fragment the
   merger knows about, and every fragment the merger expects has a producer;
-
-  every LaTeX macro the report uses is defined by python/lr/report.py, and every
-  macro report.py defines is used somewhere (an unused macro is usually a
-  renamed one);
-
-  every figure the report includes is one python/lr/figures.py can produce;
 
   the protocol constants in the C++ headers match what the tests and the schema
   documentation say they are.
@@ -115,71 +109,6 @@ def check_fragments(c: Checker) -> None:
             c.fail(f"{where} writes {frag}, which merge_results.py does not expect")
 
 
-def check_macros(c: Checker) -> None:
-    report_py = read(ROOT / "python/lr/report.py")
-    # Macro names as they are constructed: literal names passed to m.num / m.pct
-    # / m.text / m.set, plus the per-cipher family built from a tag.
-    literal = set(re.findall(r'm\.(?:num|pct|text|set)\(\s*"([A-Za-z]+)"', report_py))
-    # Names built from an f-string, e.g. f"fitA{tag}{suffix}" or
-    # f"virt{name}Cycles". Each becomes a regex in which the placeholders match
-    # any run of letters, so a macro assembled at run time is still recognised.
-    templated = []
-    for pattern in re.findall(r'\(\s*f"([A-Za-z{}_]+)"', report_py):
-        if "{" not in pattern:
-            continue
-        rx = re.sub(r"\{[a-z_]+\}", "[A-Za-z]+", pattern)
-        templated.append(re.compile(r"^" + rx + r"$"))
-
-    used: set[str] = set()
-    for tex in list((ROOT / "report").glob("*.tex")) + \
-               list((ROOT / "report/sections").glob("*.tex")):
-        used |= set(re.findall(r"\\([a-z][A-Za-z]*)\b", read(tex)))
-
-    # LaTeX and package control sequences that are not ours.
-    builtin = {
-        "documentclass", "input", "usepackage", "graphicspath", "settopmatter",
-        "renewcommand", "newcommand", "setcopyright", "begin", "end", "title",
-        "subtitle", "author", "affiliation", "institution", "country", "keywords",
-        "maketitle", "balance", "bibliographystyle", "bibliography", "section",
-        "paragraph", "subsection", "label", "ref", "cite", "caption", "centering",
-        "footnotesize", "small", "texttt", "emph", "textbf", "textemdash",
-        "includegraphics", "linewidth", "columnwidth", "item", "itemize", "quad",
-        "qquad", "frac", "rightarrow", "text", "footnotetextcopyrightpermission",
-        "lrfigure", "fbox", "parbox", "toprule", "midrule", "bottomrule",
-        "multicolumn", "textbackslash", "textasciitilde", "textasciicircum",
-        "protect", "hbox", "vspace", "hspace", "noindent", "leq", "geq", "times",
-        "mathrm", "left", "right", "sum", "cdot", "rho", "alpha", "beta",
-        "lambda", "mu", "sigma", "approx", "ldots", "dots", "footnote",
-        "columnwidth", "textwidth", "linewidth", "url", "href", "verb",
-    }
-    ours_used = {u for u in used if u not in builtin}
-
-    for name in sorted(ours_used):
-        if name in literal:
-            continue
-        if any(rx.match(name) for rx in templated):
-            continue
-        c.fail(f"report uses \\{name}, which python/lr/report.py never defines")
-
-    for name in sorted(literal):
-        if name not in used:
-            c.note(f"macro \\{name} is defined but never used in the report")
-
-
-def check_figures(c: Checker) -> None:
-    figures_py = read(ROOT / "python/lr/figures.py")
-    produced = set(re.findall(r'_save\(fig,\s*outdir,\s*"([a-z_]+)"\)', figures_py))
-    included: set[str] = set()
-    for tex in (ROOT / "report/sections").glob("*.tex"):
-        included |= set(re.findall(r"\\lrfigure\{([a-z_]+)\}", read(tex)))
-        included |= set(re.findall(r"\\includegraphics\[[^\]]*\]\{([a-z_]+)\}",
-                                   read(tex)))
-    for name in sorted(included - produced):
-        c.fail(f"report includes figure '{name}', which figures.py cannot draw")
-    for name in sorted(produced - included):
-        c.note(f"figures.py draws '{name}', which the report does not include")
-
-
 def check_protocol_constants(c: Checker) -> None:
     worker = read(ROOT / "include/lr/worker.hpp")
     hdr = re.search(r"LR_HDR\s*=\s*sizeof\(WireHdr\)", worker)
@@ -248,11 +177,6 @@ def check_ciphers(c: Checker) -> None:
     for name in sorted(swept):
         if f'"{name}"' not in factory:
             c.fail(f"E1 sweeps cipher '{name}', which aead_factory.cpp does not build")
-    tags = read(ROOT / "python/lr/report.py")
-    for name in sorted(swept):
-        if f'"{name}"' not in tags:
-            c.fail(f"cipher '{name}' has no LaTeX macro tag in report.py, so its "
-                   "macro name would contain digits and TeX would reject it")
 
 
 def main() -> int:
@@ -264,8 +188,6 @@ def main() -> int:
     c = Checker()
     check_experiments(c)
     check_fragments(c)
-    check_macros(c)
-    check_figures(c)
     check_protocol_constants(c)
     check_ciphers(c)
 

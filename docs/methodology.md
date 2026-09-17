@@ -117,7 +117,7 @@ Three classes, enforced in code rather than by convention:
 
 | class | what it means | what it may do |
 |---|---|---|
-| `development` | cannot time reliably: macOS, a non-invariant counter, no hard thread affinity | build, self-test, analyse, typeset |
+| `development` | cannot time reliably: macOS, a non-invariant counter, no hard thread affinity | build, self-test, analyse |
 | `constrained` | Linux, invariant counter, hard affinity, but no kernel isolation or fewer than two usable cores | measure, with its caveats attached to every dataset |
 | `measurement` | constrained plus kernel isolation on the data-plane cores, homogeneous cores, at least two of them | measure |
 
@@ -191,24 +191,21 @@ costing a tenth of a packet but occurring once per thousand packets contaminates
 nothing. The control was rewritten rather than its threshold loosened; that
 distinction is the whole value of having controls.
 
-## What is generated and what is written
+## What is generated and what is checked
 
-No measured number appears literally in the report's prose. Every quantity is a
-macro generated from `results.json`, so a sentence and a table cannot disagree
-and a re-run updates the text along with the figures.
-`tools/check_numbers.py` fails the build when a bare numeral appears where a
-macro belongs, and separately re-derives a sample of macros from the dataset —
-including checking that every `s*` equals its own `a/b`.
+Every figure is drawn from `results.json` and from nothing else, so a re-run
+redraws every figure from the dataset that run measured.
 
-`tools/check_wiring.py` checks the other direction: that every fragment the
-merger expects has a producer, every macro the report uses is defined, every
-figure it includes can be drawn, and the protocol constants in the headers still
-match what the tests and the documentation say.
+`tools/check_wiring.py` checks that the pieces still agree: that every
+experiment the bench binary declares is dispatched and defined, every fragment
+the merger expects has a producer, every cipher the sweep declares can be
+built, and the protocol constants in the headers still match what the tests
+and the documentation say.
 
 ## Completeness
 
 Every experiment writes a fragment whether or not it could run. One that could
 not records `available: false` and a reason. The dataset is therefore always
-complete, the report renders "not available, because X" instead of a missing
-figure, and a reader can tell the difference between an experiment that was
+complete, it records "not available, because X" where a figure would have
+been drawn, and a reader can tell the difference between an experiment that was
 skipped and one that was never attempted.

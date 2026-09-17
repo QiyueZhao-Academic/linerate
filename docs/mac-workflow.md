@@ -16,7 +16,7 @@ and the steps it is made of, each usable on its own:
 ./mac/linerate run --full    # the real sweep
 ./mac/linerate watch         # re-attach to a sweep already running
 ./mac/linerate fetch         # bring the dataset back and merge it
-./mac/linerate report        # figures, tables and the PDF, here
+./mac/linerate figures       # E9 and the figures, here
 ./mac/linerate status        # what exists and what is billing
 ./mac/linerate down          # delete the VMs so they stop billing
 ./mac/linerate purge         # delete every other instance on the account
@@ -54,13 +54,13 @@ one. Thread affinity on macOS is a hint rather than an instruction, and a
 per-packet cycle count from an unpinned thread is worse than no number at all
 because it looks like data.
 
-So the split is: the Mac creates, builds, drives, collects and typesets. The VMs
-measure.
+So the split is: the Mac creates, builds, drives, collects and draws the
+figures. The VMs measure.
 
 ## What each command actually does
 
 **`go`** — asks one question, then runs `preflight`, `up`, `run --quick`,
-`run --full`, `fetch`, `report` and `down` in that order. If any of them fails
+`run --full`, `fetch`, `figures` and `down` in that order. If any of them fails
 it says which, prints the three commands that resume, look at or stop the run,
 and offers to delete the instances so that a failure does not quietly keep
 billing.
@@ -121,11 +121,11 @@ earlier run is moved aside first, because the merge refuses to combine fragments
 from different machines and that refusal is correct. The archive itself contains
 no dataset: nothing in the tree is a measurement until one is made.
 
-**`report`** — figures, macros, tables and then the PDF, in that order and only
-in that order: the macros depend on facts the figures compute while drawing, and
-the PDF depends on both. Then `check_wiring.py` and `check_numbers.py`. A
-missing LaTeX installation costs the PDF and nothing else; the step warns and
-carries on.
+**`figures`** — E9 and then the figures, in that order and only in that order:
+E9 writes its own fragment and the admission figure draws from it. Then
+`check_wiring.py`. A figure whose data is absent from the dataset is skipped
+with the reason printed; the step stops only when drawing itself fails — numpy
+or matplotlib missing, say — with the error printed above.
 
 **`down`** — deletes both instances after confirming. The project stays;
 deleting it is one further command that the output prints.

@@ -1,6 +1,6 @@
 # Analysis dependencies. The harness itself needs none of these: it is C++ and
-# writes JSON. These are for the machine that analyses and typesets, which is
-# often not the machine that measured.
+# writes JSON. These are for the machine that analyses and draws the figures,
+# which is often not the machine that measured.
 
 numpy>=1.24          # the fits, and every array in the figures
 matplotlib>=3.7      # the figures

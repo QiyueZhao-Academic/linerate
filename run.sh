@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run.sh — measure, analyse, typeset.
+# run.sh — measure, analyse, draw the figures.
 #
 #   ./run.sh --quick                     about two minutes, exercises everything
 #   ./run.sh                             the core experiments
@@ -70,18 +70,17 @@ else
   fi
   [ -f results/raw/e9_admission.json ] || python3 tools/emit_fragment.py \
     --key e9 --out results/raw/e9_admission.json \
-    --unavailable "the admission model is fitted by python/make_report.py once E5 has enough conditions to split on"
+    --unavailable "the admission model is fitted by python/make_figures.py once E5 has enough conditions to split on"
   echo "==> merging"
   python3 tools/merge_results.py --raw results/raw --out results/results.json
 fi
 
-echo "==> report"
-python3 python/make_report.py || echo "    the report did not build; the dataset is still in results/"
+echo "==> figures"
+python3 python/make_figures.py || echo "    the figures were not drawn; the dataset is still in results/"
 
 echo "==> checks"
 python3 tools/check_wiring.py  || echo "    wiring problems above"
-python3 tools/check_numbers.py || echo "    numerical problems above"
 
 echo
 echo "results/results.json          the dataset"
-echo "results/linerate-report.pdf   the report"
+echo "results/figures/              the figures"
